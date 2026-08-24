@@ -1,28 +1,26 @@
-https://github.com/ZombieDuckling/packet-tracer-topology-creator/new/main
 #!/usr/bin/env python3
 """
 Simple Packet Tracer Topology Creator
 ------------------------------------
 
 This script provides a minimal, reliable way to generate network
-topology definitions for Cisco Packet Tracer based on either a
-plain‑text or PDF description.  It combines the validation ideas
-from the `CiscoPacketTracerAutomator` project with the OS and
-window‑management scaffolding from `topology‑creator‑cpt`.  The goal
-is to remain simple and robust: it reads a single input file,
-parses each line into one of four categories (end devices,
-network devices, networks and links), validates the format of
-each line and prints a summary of the parsed topology.  The
-automation function that actually drives Packet Tracer is left
-as a stub for you to implement on a machine with Packet Tracer
+topology definitions for Cisco Packet Tracer based on either a
+plain-text or PDF description. It combines validation ideas from the
+`CiscoPacketTracerAutomator` project with OS and window-management
+scaffolding from `topology-creator-cpt`. The goal is to remain simple
+and robust: it reads a single input file, parses each line into one of
+four categories (end devices, network devices, networks and links),
+validates the format of each line and prints a summary of the parsed
+topology. The automation function that actually drives Packet Tracer is
+left as a stub for you to implement on a machine with Packet Tracer
 installed.
 
 Usage:
     python cpt_topology_creator.py <path_to_txt_or_pdf>
 
-If the file is a PDF, the script requires the `pdfplumber`
-package.  Install it with `pip install pdfplumber`.  For text
-files, no external dependencies are needed.
+If the file is a PDF, the script requires the `pdfplumber` package.
+Install it with `pip install pdfplumber`. For text files, no external
+dependencies are needed.
 
 Example input (plain text or in the body of a PDF):
 
@@ -36,25 +34,19 @@ Example input (plain text or in the body of a PDF):
     -ntw0, r0, sw0
 
 This script is intentionally conservative: it expects each line to
-match one of the known patterns.  If it encounters an unknown
-pattern, it reports an error and stops.
-
-The stub `run_automation` function demonstrates where you would
-invoke your Packet Tracer automation routine.  For a real
-implementation you could import `pyautogui` and use the
-window‑management code from `topology-creator-cpt` to start
-Packet Tracer, then iterate over the parsed data to place
-devices, connect them and configure IP addresses.
+match one of the known patterns. If it encounters an unknown pattern, it
+reports an error and stops.
 """
 
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Dict, Tuple, Optional
+from typing import Dict, List, Optional, Tuple
 
 try:
     import pdfplumber  # type: ignore
@@ -65,6 +57,7 @@ except ImportError:
 @dataclass
 class Topology:
     """Holds lists of parsed topology elements."""
+
     end_devices: List[str]
     network_devices: List[str]
     networks: List[str]
@@ -99,27 +92,36 @@ def extract_text_from_file(path: Path) -> str:
                 if page_text:
                     text_parts.append(page_text)
         return "\n".join(text_parts)
-    else:
-        return path.read_text(encoding="utf-8")
+    return path.read_text(encoding="utf-8")
+
+
+def _split_fields(line: str) -> List[str]:
+    return [field.strip() for field in line.split(",")]
+
+
+def _is_valid_ipv4(address: str) -> bool:
+    try:
+        ipaddress.IPv4Address(address)
+    except ValueError:
+        return False
+    return True
 
 
 def parse_topology(text: str) -> Tuple[Topology, List[str]]:
     """Parse topology definitions from a block of text.
 
-    Returns a tuple `(topology, errors)` where `topology` contains
-    lists of end devices, network devices, networks and links, and
-    `errors` contains strings describing any lines that failed to
-    match the expected patterns.  A link is defined as a line with
-    three comma separated values starting with a '-' that does not
-    match the device or network patterns.
+    Returns a tuple `(topology, errors)` where `topology` contains lists of end
+    devices, network devices, networks and links, and `errors` contains strings
+    describing any lines that failed to match the expected patterns. A link is
+    defined as a line with three comma-separated values starting with a '-' that
+    does not match the device or network patterns.
     """
-    # Regular expressions for each type of line.  These are adapted
-    # from CiscoPacketTracerAutomator's Controller.java
-    end_device_pattern = re.compile(
-        r"^-[A-Za-z]+,\s*[A-Za-z]+\d*,\s*\d{1,3}(?:\.\d{1,3}){3}$"
-    )
-    network_device_pattern = re.compile(r"^-[A-Za-z]+,\s*[A-Za-z]+\d*$")
-    network_pattern = re.compile(r"^-[A-Za-z]+,\s*[A-Za-z]+\d*$")
+    # Regular expressions for each type of line. These are adapted from
+    # CiscoPacketTracerAutomator's Controller.java.
+    name_pattern = r"[A-Za-z]+\d*"
+    kind_pattern = r"-[A-Za-z]+"
+    end_device_pattern = re.compile(rf"^{kind_pattern},\s*{name_pattern},\s*([0-9.]+)$")
+    network_device_pattern = re.compile(rf"^{kind_pattern},\s*{name_pattern}$")
 
     end_devices: List[str] = []
     network_devices: List[str] = []
@@ -131,37 +133,40 @@ def parse_topology(text: str) -> Tuple[Topology, List[str]]:
         line = raw_line.strip()
         if not line:
             continue  # skip empty lines
-        # Determine the type of line by counting commas
+
         comma_count = line.count(",")
-        # End device lines have two commas and an IP address
-        if end_device_pattern.match(line):
-            end_devices.append(line)
-        # Network/device lines have one comma; decide based on keyword
-        elif comma_count == 1 and network_device_pattern.match(line):
-            keyword = line.split(",")[0].strip("-").lower()
+        end_device_match = end_device_pattern.match(line)
+        if end_device_match:
+            ip_address = end_device_match.group(1)
+            if _is_valid_ipv4(ip_address):
+                end_devices.append(line)
+            else:
+                errors.append(f"Line {idx}: Invalid IPv4 address -> '{ip_address}'")
+            continue
+
+        if comma_count == 1 and network_device_pattern.match(line):
+            keyword = _split_fields(line)[0].strip("-").lower()
             if keyword in {"pc", "laptop", "host"}:
-                # treat as end device even though it looks like network device
+                # Treat as an end device even when no address is supplied.
                 end_devices.append(line)
             elif keyword in {"router", "switch", "firewall"}:
                 network_devices.append(line)
             else:
                 networks.append(line)
-        # Links have two commas but no IP address
-        elif comma_count == 2:
+        elif comma_count == 2 and line.startswith("-"):
             links.append(line)
         else:
-            errors.append(f"Line {idx}: Unrecognised format → '{line}'")
+            errors.append(f"Line {idx}: Unrecognised format -> '{line}'")
     return Topology(end_devices, network_devices, networks, links), errors
 
 
 def run_automation(topology: Topology) -> None:
-    """Stub function to run Packet Tracer automation.
+    """Stub function to run Packet Tracer automation.
 
     In a real implementation this function would use a library such as
-    `pyautogui` together with OS/window management code to launch
-    Cisco Packet Tracer, place the appropriate devices on the canvas,
-    connect them and assign IP addresses.  For now we simply print
-    what would be done.
+    `pyautogui` together with OS/window management code to launch Cisco Packet
+    Tracer, place the appropriate devices on the canvas, connect them and assign
+    IP addresses. For now we simply print what would be done.
     """
     print("\n=== Topology Summary ===")
     print(f"End devices ({len(topology.end_devices)}):")
@@ -211,7 +216,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         for err in errors:
             print(err)
         print(
-            "\nPlease correct the above lines and try again.  Each line must "
+            "\nPlease correct the above lines and try again. Each line must "
             "begin with '-' and follow one of the supported patterns."
         )
         return 1
